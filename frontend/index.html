@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>how-pulse</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="min-h-screen bg-neutral-950 text-neutral-100">
+    <main class="mx-auto flex min-h-screen w-full max-w-5xl flex-col p-4 md:p-8">
+      <header class="mb-4 md:mb-8">
+        <h1 class="text-2xl font-semibold tracking-wide text-cyan-300 md:text-3xl">how-pulse</h1>
+        <p class="mt-2 text-sm text-neutral-400">
+          即時同步視覺節拍器（團員預設模式）
+        </p>
+      </header>
+
+      <section
+        id="flashStage"
+        class="relative mb-6 flex flex-1 items-center justify-center rounded-3xl border border-neutral-800 bg-neutral-900 transition-colors duration-75"
+      >
+        <div class="pointer-events-none text-center">
+          <p id="statusText" class="text-sm uppercase tracking-[0.2em] text-neutral-400">STOPPED</p>
+          <p id="beatText" class="mt-3 text-5xl font-bold text-neutral-200 md:text-7xl">-</p>
+          <p id="bpmText" class="mt-3 text-base text-neutral-400">BPM 120</p>
+        </div>
+      </section>
+
+      <section
+        id="adminPanel"
+        class="hidden rounded-2xl border border-neutral-800 bg-neutral-900/80 p-4 shadow-2xl shadow-black/40 backdrop-blur"
+      >
+        <div class="mb-3 flex items-center justify-between">
+          <h2 class="text-lg font-medium text-cyan-200">鼓手控制台</h2>
+          <span class="text-xs text-neutral-400">Admin mode</span>
+        </div>
+
+        <label for="bpmSlider" class="mb-2 block text-sm text-neutral-300">
+          BPM: <span id="bpmValue" class="font-semibold text-cyan-200">120</span>
+        </label>
+        <input
+          id="bpmSlider"
+          type="range"
+          min="40"
+          max="240"
+          step="1"
+          value="120"
+          class="w-full accent-cyan-400"
+        />
+        <p id="bpmLockHint" class="mt-2 text-xs text-neutral-500">
+          播放中無法調整 BPM，請先停止再設定。
+        </p>
+        <div class="mt-3 grid grid-cols-2 gap-2 text-xs text-neutral-400 md:grid-cols-4">
+          <div>連線裝置: <span id="connectedClients" class="text-neutral-200">-</span></div>
+          <div>已對時: <span id="readyClients" class="text-neutral-200">-</span></div>
+          <div>建議延遲: <span id="recommendedDelay" class="text-neutral-200">-</span></div>
+          <div>本機 RTT/Jitter: <span id="localSyncQuality" class="text-neutral-200">-</span></div>
+        </div>
+
+        <div class="mt-4 flex gap-3">
+          <button
+            id="startBtn"
+            class="flex-1 rounded-xl bg-emerald-500 px-4 py-3 font-semibold text-emerald-950 transition hover:bg-emerald-400"
+          >
+            開始
+          </button>
+          <button
+            id="stopBtn"
+            class="flex-1 rounded-xl bg-rose-500 px-4 py-3 font-semibold text-rose-950 transition hover:bg-rose-400"
+          >
+            停止
+          </button>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js?v=stable-20260525-2"></script>
+  </body>
+</html>
