@@ -3,13 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>how-pulse</title>
+    <title>Heart of Worship 節拍器</title>
     <script src="https://cdn.tailwindcss.com"></script>
   </head>
   <body class="min-h-screen bg-neutral-950 text-neutral-100">
     <main class="mx-auto flex min-h-screen w-full max-w-5xl flex-col p-4 md:p-8">
       <header class="mb-4 md:mb-8">
-        <h1 class="text-2xl font-semibold tracking-wide text-cyan-300 md:text-3xl">how-pulse</h1>
+        <h1 class="text-2xl font-semibold tracking-wide text-cyan-300 md:text-3xl">Heart of Worship 節拍器</h1>
         <p class="mt-2 text-sm text-neutral-400">
           即時同步視覺節拍器（團員預設模式）
         </p>
@@ -35,14 +35,35 @@
           <span class="text-xs text-neutral-400">Admin mode</span>
         </div>
 
-        <label for="bpmSlider" class="mb-2 block text-sm text-neutral-300">
-          BPM: <span id="bpmValue" class="font-semibold text-cyan-200">120</span>
-        </label>
+        <div class="mb-3 flex items-end justify-between gap-3">
+          <div>
+            <p class="text-sm text-neutral-300">BPM</p>
+            <p id="bpmValue" class="text-5xl font-bold leading-none text-cyan-200 md:text-6xl">120</p>
+          </div>
+          <div class="flex gap-2">
+            <button
+              id="bpmMinusBtn"
+              type="button"
+              class="rounded-xl border border-neutral-700 px-4 py-3 text-2xl font-bold leading-none text-neutral-100 transition hover:bg-neutral-800"
+              aria-label="降低 BPM"
+            >
+              -
+            </button>
+            <button
+              id="bpmPlusBtn"
+              type="button"
+              class="rounded-xl border border-neutral-700 px-4 py-3 text-2xl font-bold leading-none text-neutral-100 transition hover:bg-neutral-800"
+              aria-label="提高 BPM"
+            >
+              +
+            </button>
+          </div>
+        </div>
         <input
           id="bpmSlider"
           type="range"
           min="40"
-          max="240"
+          max="180"
           step="1"
           value="120"
           class="w-full accent-cyan-400"

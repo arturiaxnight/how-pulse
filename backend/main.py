@@ -153,7 +153,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             if msg_type == "set_bpm":
                 try:
                     bpm_value = int(data.get("bpm", global_state["bpm"]))
-                    bpm_value = max(30, min(300, bpm_value))
+                    bpm_value = max(40, min(180, bpm_value))
                     if global_state["is_playing"]:
                         await manager.send_personal_message(
                             {"type": "error", "message": "Cannot change BPM while playing."},

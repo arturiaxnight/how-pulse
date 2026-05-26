@@ -6,6 +6,8 @@ const bpmText = document.getElementById("bpmText");
 const adminPanel = document.getElementById("adminPanel");
 const bpmSlider = document.getElementById("bpmSlider");
 const bpmValue = document.getElementById("bpmValue");
+const bpmMinusBtn = document.getElementById("bpmMinusBtn");
+const bpmPlusBtn = document.getElementById("bpmPlusBtn");
 const bpmLockHint = document.getElementById("bpmLockHint");
 const connectedClients = document.getElementById("connectedClients");
 const readyClients = document.getElementById("readyClients");
@@ -45,6 +47,100 @@ let isPlaying = false;
 let startTime = null;
 let lastBeatIndex = -1;
 
+const AUDIO_PATHS = {
+  downbeat: "/Metronomes/Synth_Sine_C_hi.wav",
+  upbeat: "/Metronomes/Synth_Sine_C_lo.wav",
+};
+let audioContext = null;
+let audioLoadPromise = null;
+const audioBuffers = {
+  downbeat: null,
+  upbeat: null,
+};
+
+function ensureAudioContext() {
+  if (audioContext) {
+    return audioContext;
+  }
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    return null;
+  }
+  audioContext = new AudioContextClass();
+  return audioContext;
+}
+
+function decodeAudioBuffer(ctx, arrayBuffer) {
+  return new Promise((resolve, reject) => {
+    ctx.decodeAudioData(arrayBuffer, resolve, reject);
+  });
+}
+
+async function loadMetronomeSounds() {
+  if (audioLoadPromise) {
+    return audioLoadPromise;
+  }
+  const ctx = ensureAudioContext();
+  if (!ctx) {
+    return null;
+  }
+
+  audioLoadPromise = (async () => {
+    const [downbeatResp, upbeatResp] = await Promise.all([
+      fetch(AUDIO_PATHS.downbeat, { cache: "force-cache" }),
+      fetch(AUDIO_PATHS.upbeat, { cache: "force-cache" }),
+    ]);
+    if (!downbeatResp.ok || !upbeatResp.ok) {
+      throw new Error("Failed to load metronome sound files.");
+    }
+    const [downbeatArrayBuffer, upbeatArrayBuffer] = await Promise.all([
+      downbeatResp.arrayBuffer(),
+      upbeatResp.arrayBuffer(),
+    ]);
+    const [downbeatBuffer, upbeatBuffer] = await Promise.all([
+      decodeAudioBuffer(ctx, downbeatArrayBuffer),
+      decodeAudioBuffer(ctx, upbeatArrayBuffer),
+    ]);
+    audioBuffers.downbeat = downbeatBuffer;
+    audioBuffers.upbeat = upbeatBuffer;
+    return audioBuffers;
+  })().catch((error) => {
+    console.warn("Metronome sounds unavailable:", error);
+    audioLoadPromise = null;
+    return null;
+  });
+
+  return audioLoadPromise;
+}
+
+function unlockAudio() {
+  const ctx = ensureAudioContext();
+  if (!ctx) {
+    return;
+  }
+  if (ctx.state === "suspended") {
+    ctx.resume().catch((error) => {
+      console.warn("Failed to resume audio context:", error);
+    });
+  }
+  loadMetronomeSounds();
+}
+
+function playBeatSound(isFirstBeat) {
+  const ctx = ensureAudioContext();
+  if (!ctx || ctx.state !== "running") {
+    return;
+  }
+  const buffer = isFirstBeat ? audioBuffers.downbeat : audioBuffers.upbeat;
+  if (!buffer) {
+    return;
+  }
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(ctx.destination);
+  source.start();
+}
+
 // serverOffsetSec = serverEpoch - localEpoch
 let serverOffsetSec = 0;
 let bestSyncRttMs = Number.POSITIVE_INFINITY;
@@ -54,6 +150,8 @@ let jitterMs = 0;
 let syncStatus = null;
 const SYNC_INTERVAL_MS = 2000;
 const SYNC_WARMUP_REQUESTS = 10;
+const MIN_BPM = 40;
+const MAX_BPM = 180;
 
 function hasReliableSync() {
   return Number.isFinite(bestSyncRttMs) && bestSyncRttMs < 700 && syncSampleCount >= 3;
@@ -68,6 +166,16 @@ function updateBpmLockUI() {
   bpmSlider.disabled = locked;
   bpmSlider.classList.toggle("opacity-50", locked);
   bpmSlider.classList.toggle("cursor-not-allowed", locked);
+  if (bpmMinusBtn) {
+    bpmMinusBtn.disabled = locked;
+    bpmMinusBtn.classList.toggle("opacity-50", locked);
+    bpmMinusBtn.classList.toggle("cursor-not-allowed", locked);
+  }
+  if (bpmPlusBtn) {
+    bpmPlusBtn.disabled = locked;
+    bpmPlusBtn.classList.toggle("opacity-50", locked);
+    bpmPlusBtn.classList.toggle("cursor-not-allowed", locked);
+  }
   if (bpmLockHint) {
     bpmLockHint.classList.toggle("text-amber-300", locked);
     bpmLockHint.classList.toggle("text-neutral-500", !locked);
@@ -117,6 +225,11 @@ function updateInfoUI() {
   updateSyncStatusUI();
 }
 
+function sendBpm(nextBpm) {
+  const clamped = Math.max(MIN_BPM, Math.min(MAX_BPM, Number(nextBpm)));
+  sendMessage({ type: "set_bpm", bpm: clamped });
+}
+
 function resetStageVisual() {
   flashStage.classList.remove("bg-red-500", "bg-white");
   flashStage.classList.add("bg-neutral-900");
@@ -125,6 +238,7 @@ function resetStageVisual() {
 function flashBeat(isFirstBeat) {
   flashStage.classList.remove("bg-neutral-900", "bg-red-500", "bg-white");
   flashStage.classList.add(isFirstBeat ? "bg-red-500" : "bg-white");
+  playBeatSound(isFirstBeat);
 
   setTimeout(() => {
     if (!isPlaying) {
@@ -352,8 +466,26 @@ if (isAdmin) {
     }
     const next = Number(bpmSlider.value);
     bpmValue.textContent = String(next);
-    sendMessage({ type: "set_bpm", bpm: next });
+    sendBpm(next);
   });
+
+  if (bpmMinusBtn) {
+    bpmMinusBtn.addEventListener("click", () => {
+      if (isPlaying) {
+        return;
+      }
+      sendBpm(bpm - 1);
+    });
+  }
+
+  if (bpmPlusBtn) {
+    bpmPlusBtn.addEventListener("click", () => {
+      if (isPlaying) {
+        return;
+      }
+      sendBpm(bpm + 1);
+    });
+  }
 
   startBtn.addEventListener("click", () => {
     sendMessage({ type: "start" });
@@ -366,4 +498,7 @@ if (isAdmin) {
 
 updateInfoUI();
 resetStageVisual();
+window.addEventListener("pointerdown", unlockAudio, { once: true });
+window.addEventListener("keydown", unlockAudio, { once: true });
+window.addEventListener("touchstart", unlockAudio, { once: true, passive: true });
 connectWebSocket();

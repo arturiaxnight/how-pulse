@@ -9,7 +9,8 @@ services:
 
   frontend:
     build:
-      context: ./frontend
+      context: .
+      dockerfile: frontend/Dockerfile
     container_name: how-pulse-frontend
     ports:
       - "5500:80"
