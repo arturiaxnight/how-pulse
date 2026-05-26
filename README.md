@@ -9,8 +9,8 @@ Heart of Worship 節拍器
 ### 2026-05-26
 
 - 新增節拍音效同步：螢幕閃爍時同步播放主拍/副拍音效
-  - 主拍（第 1 拍）：`Metronomes/Synth_Sine_C_hi.wav`
-  - 副拍（第 2~4 拍）：`Metronomes/Synth_Sine_C_lo.wav`
+  - 主拍（第 1 拍）：`Metronomes/Perc_Glass_hi.wav`
+  - 副拍（第 2~4 拍）：`Metronomes/Perc_Glass_lo.wav`
 - 鼓手控制台 BPM 介面優化
   - BPM 顯示改為大字體
   - 新增 `-` 與 `+` 按鈕，可每次精準調整 1 BPM

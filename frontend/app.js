@@ -48,8 +48,8 @@ let startTime = null;
 let lastBeatIndex = -1;
 
 const AUDIO_PATHS = {
-  downbeat: "/Metronomes/Synth_Sine_C_hi.wav",
-  upbeat: "/Metronomes/Synth_Sine_C_lo.wav",
+  downbeat: "/Metronomes/Perc_Glass_hi.wav",
+  upbeat: "/Metronomes/Perc_Glass_lo.wav",
 };
 let audioContext = null;
 let audioLoadPromise = null;
