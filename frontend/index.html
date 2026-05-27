@@ -69,8 +69,18 @@
           class="w-full accent-cyan-400"
         />
         <p id="bpmLockHint" class="mt-2 text-xs text-neutral-500">
-          播放中無法調整 BPM，請先停止再設定。
+          播放中無法調整 BPM 或音效模式，請先停止再設定。
         </p>
+        <div class="mt-4">
+          <label for="soundModeSelect" class="mb-1 block text-sm text-neutral-300">音效模式</label>
+          <select
+            id="soundModeSelect"
+            class="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none transition focus:border-cyan-400"
+          >
+            <option value="A">模式 A（只用 metronome.mp3）</option>
+            <option value="B">模式 B（主拍/副拍）</option>
+          </select>
+        </div>
         <div class="mt-3 grid grid-cols-2 gap-2 text-xs text-neutral-400 md:grid-cols-4">
           <div>連線裝置: <span id="connectedClients" class="text-neutral-200">-</span></div>
           <div>已對時: <span id="readyClients" class="text-neutral-200">-</span></div>
@@ -95,6 +105,6 @@
       </section>
     </main>
 
-    <script src="./app.js?v=stable-20260525-2"></script>
+    <script src="./app.js?v=stable-20260527-sound-mode"></script>
   </body>
 </html>

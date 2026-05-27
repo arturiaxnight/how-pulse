@@ -53,6 +53,7 @@ global_state: dict[str, Any] = {
     "bpm": 120,
     "is_playing": False,
     "start_time": None,
+    "sound_mode": "B",
 }
 client_ids: dict[WebSocket, str] = {}
 client_reports: dict[str, dict[str, Any]] = {}
@@ -167,6 +168,21 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         {"type": "error", "message": "bpm must be a number."},
                         websocket,
                     )
+            elif msg_type == "set_sound_mode":
+                sound_mode = str(data.get("sound_mode", global_state.get("sound_mode", "B"))).upper()
+                if sound_mode not in {"A", "B"}:
+                    await manager.send_personal_message(
+                        {"type": "error", "message": "sound_mode must be A or B."},
+                        websocket,
+                    )
+                elif global_state["is_playing"]:
+                    await manager.send_personal_message(
+                        {"type": "error", "message": "Cannot change sound mode while playing."},
+                        websocket,
+                    )
+                else:
+                    global_state["sound_mode"] = sound_mode
+                    updated = True
             elif msg_type == "start":
                 start_delay_seconds = compute_start_delay_seconds()
                 global_state["is_playing"] = True

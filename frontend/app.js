@@ -9,6 +9,7 @@ const bpmValue = document.getElementById("bpmValue");
 const bpmMinusBtn = document.getElementById("bpmMinusBtn");
 const bpmPlusBtn = document.getElementById("bpmPlusBtn");
 const bpmLockHint = document.getElementById("bpmLockHint");
+const soundModeSelect = document.getElementById("soundModeSelect");
 const connectedClients = document.getElementById("connectedClients");
 const readyClients = document.getElementById("readyClients");
 const recommendedDelay = document.getElementById("recommendedDelay");
@@ -46,17 +47,39 @@ let bpm = 120;
 let isPlaying = false;
 let startTime = null;
 let lastBeatIndex = -1;
+let soundMode = "B";
 
-const AUDIO_PATHS = {
-  downbeat: "/Metronomes/Perc_Glass_hi.wav",
-  upbeat: "/Metronomes/Perc_Glass_lo.wav",
+const AUDIO_MODES = {
+  A: {
+    downbeat: "/Metronomes/metronome.mp3",
+    upbeat: "/Metronomes/metronome.mp3",
+  },
+  B: {
+    downbeat: "/Metronomes/di.mp3",
+    upbeat: "/Metronomes/du.mp3",
+  },
 };
 let audioContext = null;
-let audioLoadPromise = null;
-const audioBuffers = {
-  downbeat: null,
-  upbeat: null,
-};
+const modeAudioCache = {};
+
+function normalizeSoundMode(mode) {
+  const normalized = String(mode || "").toUpperCase();
+  return AUDIO_MODES[normalized] ? normalized : "B";
+}
+
+function getModeAudioState(mode) {
+  const normalized = normalizeSoundMode(mode);
+  if (!modeAudioCache[normalized]) {
+    modeAudioCache[normalized] = {
+      promise: null,
+      buffers: {
+        downbeat: null,
+        upbeat: null,
+      },
+    };
+  }
+  return modeAudioCache[normalized];
+}
 
 function ensureAudioContext() {
   if (audioContext) {
@@ -76,19 +99,22 @@ function decodeAudioBuffer(ctx, arrayBuffer) {
   });
 }
 
-async function loadMetronomeSounds() {
-  if (audioLoadPromise) {
-    return audioLoadPromise;
+async function loadMetronomeSounds(targetMode = soundMode) {
+  const normalizedMode = normalizeSoundMode(targetMode);
+  const modeAudioState = getModeAudioState(normalizedMode);
+  if (modeAudioState.promise) {
+    return modeAudioState.promise;
   }
   const ctx = ensureAudioContext();
   if (!ctx) {
     return null;
   }
+  const paths = AUDIO_MODES[normalizedMode];
 
-  audioLoadPromise = (async () => {
+  modeAudioState.promise = (async () => {
     const [downbeatResp, upbeatResp] = await Promise.all([
-      fetch(AUDIO_PATHS.downbeat, { cache: "force-cache" }),
-      fetch(AUDIO_PATHS.upbeat, { cache: "force-cache" }),
+      fetch(paths.downbeat, { cache: "force-cache" }),
+      fetch(paths.upbeat, { cache: "force-cache" }),
     ]);
     if (!downbeatResp.ok || !upbeatResp.ok) {
       throw new Error("Failed to load metronome sound files.");
@@ -101,16 +127,16 @@ async function loadMetronomeSounds() {
       decodeAudioBuffer(ctx, downbeatArrayBuffer),
       decodeAudioBuffer(ctx, upbeatArrayBuffer),
     ]);
-    audioBuffers.downbeat = downbeatBuffer;
-    audioBuffers.upbeat = upbeatBuffer;
-    return audioBuffers;
+    modeAudioState.buffers.downbeat = downbeatBuffer;
+    modeAudioState.buffers.upbeat = upbeatBuffer;
+    return modeAudioState.buffers;
   })().catch((error) => {
     console.warn("Metronome sounds unavailable:", error);
-    audioLoadPromise = null;
+    modeAudioState.promise = null;
     return null;
   });
 
-  return audioLoadPromise;
+  return modeAudioState.promise;
 }
 
 function unlockAudio() {
@@ -123,7 +149,7 @@ function unlockAudio() {
       console.warn("Failed to resume audio context:", error);
     });
   }
-  loadMetronomeSounds();
+  loadMetronomeSounds(soundMode);
 }
 
 function playBeatSound(isFirstBeat) {
@@ -131,8 +157,10 @@ function playBeatSound(isFirstBeat) {
   if (!ctx || ctx.state !== "running") {
     return;
   }
-  const buffer = isFirstBeat ? audioBuffers.downbeat : audioBuffers.upbeat;
+  const modeAudioState = getModeAudioState(soundMode);
+  const buffer = isFirstBeat ? modeAudioState.buffers.downbeat : modeAudioState.buffers.upbeat;
   if (!buffer) {
+    loadMetronomeSounds(soundMode);
     return;
   }
   const source = ctx.createBufferSource();
@@ -179,6 +207,11 @@ function updateBpmLockUI() {
   if (bpmLockHint) {
     bpmLockHint.classList.toggle("text-amber-300", locked);
     bpmLockHint.classList.toggle("text-neutral-500", !locked);
+  }
+  if (soundModeSelect) {
+    soundModeSelect.disabled = locked;
+    soundModeSelect.classList.toggle("opacity-50", locked);
+    soundModeSelect.classList.toggle("cursor-not-allowed", locked);
   }
 }
 
@@ -302,7 +335,12 @@ function applyStateFromServer(payload) {
   bpm = Number(state.bpm) || 120;
   isPlaying = Boolean(state.is_playing);
   startTime = typeof state.start_time === "number" ? state.start_time : null;
+  soundMode = normalizeSoundMode(state.sound_mode);
+  if (soundModeSelect) {
+    soundModeSelect.value = soundMode;
+  }
   syncStatus = payload.sync_status || null;
+  loadMetronomeSounds(soundMode);
 
   // Fallback offset before sync responses arrive.
   if (typeof payload.server_time === "number" && !hasReliableSync()) {
@@ -484,6 +522,16 @@ if (isAdmin) {
         return;
       }
       sendBpm(bpm + 1);
+    });
+  }
+
+  if (soundModeSelect) {
+    soundModeSelect.addEventListener("change", () => {
+      if (isPlaying) {
+        soundModeSelect.value = soundMode;
+        return;
+      }
+      sendMessage({ type: "set_sound_mode", sound_mode: normalizeSoundMode(soundModeSelect.value) });
     });
   }
 
