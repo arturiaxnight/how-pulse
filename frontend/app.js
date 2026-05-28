@@ -2,6 +2,9 @@ const flashStage = document.getElementById("flashStage");
 const statusText = document.getElementById("statusText");
 const beatText = document.getElementById("beatText");
 const bpmText = document.getElementById("bpmText");
+const soundUnlockPanel = document.getElementById("soundUnlockPanel");
+const soundUnlockHint = document.getElementById("soundUnlockHint");
+const enableSoundBtn = document.getElementById("enableSoundBtn");
 
 const adminPanel = document.getElementById("adminPanel");
 const bpmSlider = document.getElementById("bpmSlider");
@@ -62,6 +65,20 @@ const AUDIO_MODES = {
 let audioContext = null;
 const modeAudioCache = {};
 
+function updateAudioUnlockUI() {
+  if (!soundUnlockPanel) {
+    return;
+  }
+  const isUnlocked = Boolean(audioContext && audioContext.state === "running");
+  const shouldShowUnlockPanel = !isAdmin && !isUnlocked;
+  soundUnlockPanel.classList.toggle("hidden", !shouldShowUnlockPanel);
+  document.body.classList.toggle("overflow-hidden", shouldShowUnlockPanel);
+  if (shouldShowUnlockPanel && soundUnlockHint) {
+    soundUnlockHint.textContent =
+      "進場後請先點一下按鈕，啟用後就會跟著螢幕節拍播放聲音。";
+  }
+}
+
 function normalizeSoundMode(mode) {
   const normalized = String(mode || "").toUpperCase();
   return AUDIO_MODES[normalized] ? normalized : "B";
@@ -90,6 +107,7 @@ function ensureAudioContext() {
     return null;
   }
   audioContext = new AudioContextClass();
+  updateAudioUnlockUI();
   return audioContext;
 }
 
@@ -144,17 +162,23 @@ function unlockAudio() {
   if (!ctx) {
     return;
   }
-  if (ctx.state === "suspended") {
-    ctx.resume().catch((error) => {
-      console.warn("Failed to resume audio context:", error);
-    });
-  }
-  loadMetronomeSounds(soundMode);
+  const resumePromise =
+    ctx.state === "suspended"
+      ? ctx.resume().catch((error) => {
+          console.warn("Failed to resume audio context:", error);
+          return null;
+        })
+      : Promise.resolve();
+  resumePromise.then(() => {
+    updateAudioUnlockUI();
+    loadMetronomeSounds(soundMode);
+  });
 }
 
 function playBeatSound(isFirstBeat) {
   const ctx = ensureAudioContext();
   if (!ctx || ctx.state !== "running") {
+    updateAudioUnlockUI();
     return;
   }
   const modeAudioState = getModeAudioState(soundMode);
@@ -341,6 +365,7 @@ function applyStateFromServer(payload) {
   }
   syncStatus = payload.sync_status || null;
   loadMetronomeSounds(soundMode);
+  updateAudioUnlockUI();
 
   // Fallback offset before sync responses arrive.
   if (typeof payload.server_time === "number" && !hasReliableSync()) {
@@ -546,7 +571,11 @@ if (isAdmin) {
 
 updateInfoUI();
 resetStageVisual();
-window.addEventListener("pointerdown", unlockAudio, { once: true });
-window.addEventListener("keydown", unlockAudio, { once: true });
-window.addEventListener("touchstart", unlockAudio, { once: true, passive: true });
+updateAudioUnlockUI();
+window.addEventListener("pointerdown", unlockAudio);
+window.addEventListener("keydown", unlockAudio);
+window.addEventListener("touchstart", unlockAudio, { passive: true });
+if (enableSoundBtn) {
+  enableSoundBtn.addEventListener("click", unlockAudio);
+}
 connectWebSocket();

@@ -105,6 +105,25 @@
       </section>
     </main>
 
-    <script src="./app.js?v=stable-20260527-sound-mode"></script>
+    <section
+      id="soundUnlockPanel"
+      class="fixed inset-0 z-50 hidden bg-neutral-950/95 p-6 backdrop-blur-sm"
+    >
+      <div class="mx-auto flex min-h-full w-full max-w-md flex-col items-center justify-center text-center">
+        <h2 class="text-2xl font-semibold text-amber-200 md:text-3xl">團員端啟用聲音</h2>
+        <p id="soundUnlockHint" class="mt-4 text-sm leading-relaxed text-amber-100/90 md:text-base">
+          進場後請先點一下按鈕，啟用後就會跟著螢幕節拍播放聲音。
+        </p>
+        <button
+          id="enableSoundBtn"
+          type="button"
+          class="mt-8 w-full rounded-2xl bg-amber-300 px-5 py-4 text-lg font-semibold text-amber-950 transition hover:bg-amber-200"
+        >
+          點一下啟用聲音
+        </button>
+      </div>
+    </section>
+
+    <script src="./app.js?v=stable-20260528-member-audio-overlay"></script>
   </body>
 </html>
