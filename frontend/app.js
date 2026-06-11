@@ -13,6 +13,10 @@ const bpmMinusBtn = document.getElementById("bpmMinusBtn");
 const bpmPlusBtn = document.getElementById("bpmPlusBtn");
 const bpmLockHint = document.getElementById("bpmLockHint");
 const soundModeSelect = document.getElementById("soundModeSelect");
+const timeSignatureSelect = document.getElementById("timeSignatureSelect");
+const sixEightFeelWrap = document.getElementById("sixEightFeelWrap");
+const sixEightFeelSelect = document.getElementById("sixEightFeelSelect");
+const meterHint = document.getElementById("meterHint");
 const connectedClients = document.getElementById("connectedClients");
 const readyClients = document.getElementById("readyClients");
 const recommendedDelay = document.getElementById("recommendedDelay");
@@ -51,6 +55,33 @@ let isPlaying = false;
 let startTime = null;
 let lastBeatIndex = -1;
 let soundMode = "B";
+let timeSignature = "4/4";
+let sixEightFeel = "subdivided";
+
+const TIME_SIGNATURES = ["4/4", "3/4", "2/4", "6/8"];
+
+function normalizeTimeSignature(value) {
+  return TIME_SIGNATURES.includes(value) ? value : "4/4";
+}
+
+function normalizeSixEightFeel(value) {
+  return value === "big" ? "big" : "subdivided";
+}
+
+// Resolves the current meter into click scheduling parameters.
+// unitsPerClick: how many BPM units (quarter notes; eighth notes for 6/8)
+// each audible click spans. accents: click positions in the bar that get the
+// downbeat sound.
+function meterInfo() {
+  if (timeSignature === "6/8") {
+    if (sixEightFeel === "big") {
+      return { clicksPerBar: 2, unitsPerClick: 3, accents: [0] }; // dotted-quarter pulse
+    }
+    return { clicksPerBar: 6, unitsPerClick: 1, accents: [0, 3] }; // 1..6, accents on 1 & 4
+  }
+  const beats = Number(timeSignature.split("/")[0]) || 4;
+  return { clicksPerBar: beats, unitsPerClick: 1, accents: [0] };
+}
 
 const AUDIO_MODES = {
   A: {
@@ -291,20 +322,21 @@ function scheduleBeatsAhead() {
     return;
   }
 
-  const beatDuration = 60 / bpm;
+  const meter = meterInfo();
+  const clickDuration = (60 / bpm) * meter.unitsPerClick;
   const serverNow = nowServerEpochSec();
 
   if (schedulerNextBeat === null) {
     const elapsed = serverNow - startTime;
-    schedulerNextBeat = elapsed <= 0 ? 0 : Math.floor(elapsed / beatDuration) + 1;
+    schedulerNextBeat = elapsed <= 0 ? 0 : Math.floor(elapsed / clickDuration) + 1;
   }
 
   const horizon = serverNow + LOOKAHEAD_SEC;
-  while (startTime + schedulerNextBeat * beatDuration <= horizon) {
+  while (startTime + schedulerNextBeat * clickDuration <= horizon) {
     const beatIndex = schedulerNextBeat;
     schedulerNextBeat += 1;
 
-    const beatServerTime = startTime + beatIndex * beatDuration;
+    const beatServerTime = startTime + beatIndex * clickDuration;
     const when =
       ctx.currentTime + (beatServerTime - nowServerEpochSec()) - outputLatencySec(ctx);
 
@@ -312,9 +344,10 @@ function scheduleBeatsAhead() {
       continue; // too late (e.g. resumed from background) — skip instead of playing off-grid
     }
 
-    const isFirstBeat = ((beatIndex % 4) + 4) % 4 === 0;
+    const clickInBar = ((beatIndex % meter.clicksPerBar) + meter.clicksPerBar) % meter.clicksPerBar;
+    const isAccent = meter.accents.includes(clickInBar);
     const source = ctx.createBufferSource();
-    source.buffer = isFirstBeat ? buffers.downbeat : buffers.upbeat;
+    source.buffer = isAccent ? buffers.downbeat : buffers.upbeat;
     source.connect(ctx.destination);
     source.start(Math.max(when, ctx.currentTime));
 
@@ -357,6 +390,23 @@ function updateBpmLockUI() {
     soundModeSelect.classList.toggle("opacity-50", locked);
     soundModeSelect.classList.toggle("cursor-not-allowed", locked);
   }
+  for (const select of [timeSignatureSelect, sixEightFeelSelect]) {
+    if (select) {
+      select.disabled = locked;
+      select.classList.toggle("opacity-50", locked);
+      select.classList.toggle("cursor-not-allowed", locked);
+    }
+  }
+}
+
+function updateMeterUI() {
+  const isSixEight = timeSignature === "6/8";
+  if (sixEightFeelWrap) {
+    sixEightFeelWrap.classList.toggle("hidden", !isSixEight);
+  }
+  if (meterHint) {
+    meterHint.classList.toggle("hidden", !isSixEight);
+  }
 }
 
 function updateSyncStatusUI() {
@@ -382,7 +432,7 @@ function updateSyncStatusUI() {
 }
 
 function updateInfoUI() {
-  bpmText.textContent = `BPM ${bpm}`;
+  bpmText.textContent = `BPM ${bpm} · ${timeSignature}`;
   bpmValue.textContent = String(bpm);
   bpmSlider.value = String(bpm);
 
@@ -459,14 +509,15 @@ function onTick() {
     return;
   }
 
-  const beatDuration = 60 / bpm;
-  const beatIndex = Math.floor(elapsed / beatDuration);
+  const meter = meterInfo();
+  const clickDuration = (60 / bpm) * meter.unitsPerClick;
+  const beatIndex = Math.floor(elapsed / clickDuration);
   if (beatIndex === lastBeatIndex) {
     return;
   }
 
   lastBeatIndex = beatIndex;
-  const beatInBar = ((beatIndex % 4) + 4) % 4;
+  const beatInBar = ((beatIndex % meter.clicksPerBar) + meter.clicksPerBar) % meter.clicksPerBar;
   beatText.textContent = String(beatInBar + 1);
   flashBeat();
   updateInfoUI();
@@ -544,9 +595,18 @@ function applyStateFromServer(payload) {
   isPlaying = Boolean(state.is_playing);
   startTime = typeof state.start_time === "number" ? state.start_time : null;
   soundMode = normalizeSoundMode(state.sound_mode);
+  timeSignature = normalizeTimeSignature(state.time_signature);
+  sixEightFeel = normalizeSixEightFeel(state.six_eight_feel);
   if (soundModeSelect) {
     soundModeSelect.value = soundMode;
   }
+  if (timeSignatureSelect) {
+    timeSignatureSelect.value = timeSignature;
+  }
+  if (sixEightFeelSelect) {
+    sixEightFeelSelect.value = sixEightFeel;
+  }
+  updateMeterUI();
   syncStatus = payload.sync_status || null;
   loadMetronomeSounds(soundMode);
   updateAudioUnlockUI();
@@ -826,6 +886,34 @@ if (isAdmin) {
         return;
       }
       sendMessage({ type: "set_sound_mode", sound_mode: normalizeSoundMode(soundModeSelect.value) });
+    });
+  }
+
+  function sendMeter() {
+    sendMessage({
+      type: "set_meter",
+      time_signature: normalizeTimeSignature(timeSignatureSelect ? timeSignatureSelect.value : timeSignature),
+      six_eight_feel: normalizeSixEightFeel(sixEightFeelSelect ? sixEightFeelSelect.value : sixEightFeel),
+    });
+  }
+
+  if (timeSignatureSelect) {
+    timeSignatureSelect.addEventListener("change", () => {
+      if (isPlaying) {
+        timeSignatureSelect.value = timeSignature;
+        return;
+      }
+      sendMeter();
+    });
+  }
+
+  if (sixEightFeelSelect) {
+    sixEightFeelSelect.addEventListener("change", () => {
+      if (isPlaying) {
+        sixEightFeelSelect.value = sixEightFeel;
+        return;
+      }
+      sendMeter();
     });
   }
 

@@ -66,11 +66,16 @@ REPORT_FRESH_SECONDS = 15.0
 SYNC_STATUS_BROADCAST_MIN_INTERVAL_SECONDS = 1.0
 last_sync_status_broadcast_at = 0.0
 
+ALLOWED_TIME_SIGNATURES = {"4/4", "3/4", "2/4", "6/8"}
+ALLOWED_SIX_EIGHT_FEELS = {"subdivided", "big"}
+
 global_state: dict[str, Any] = {
     "bpm": 120,
     "is_playing": False,
     "start_time": None,
     "sound_mode": "B",
+    "time_signature": "4/4",
+    "six_eight_feel": "subdivided",
 }
 client_ids: dict[WebSocket, str] = {}
 client_reports: dict[str, dict[str, Any]] = {}
@@ -200,6 +205,23 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     )
                 else:
                     global_state["sound_mode"] = sound_mode
+                    updated = True
+            elif msg_type == "set_meter":
+                time_signature = str(data.get("time_signature", global_state.get("time_signature", "4/4")))
+                six_eight_feel = str(data.get("six_eight_feel", global_state.get("six_eight_feel", "subdivided")))
+                if time_signature not in ALLOWED_TIME_SIGNATURES or six_eight_feel not in ALLOWED_SIX_EIGHT_FEELS:
+                    await manager.send_personal_message(
+                        {"type": "error", "message": "Invalid time signature or feel."},
+                        websocket,
+                    )
+                elif global_state["is_playing"]:
+                    await manager.send_personal_message(
+                        {"type": "error", "message": "Cannot change meter while playing."},
+                        websocket,
+                    )
+                else:
+                    global_state["time_signature"] = time_signature
+                    global_state["six_eight_feel"] = six_eight_feel
                     updated = True
             elif msg_type == "start":
                 if global_state["is_playing"]:

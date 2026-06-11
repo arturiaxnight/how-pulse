@@ -81,6 +81,33 @@
             <option value="B">模式 B（主拍/副拍）</option>
           </select>
         </div>
+        <div class="mt-4 grid grid-cols-2 gap-3">
+          <div>
+            <label for="timeSignatureSelect" class="mb-1 block text-sm text-neutral-300">拍號</label>
+            <select
+              id="timeSignatureSelect"
+              class="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none transition focus:border-cyan-400"
+            >
+              <option value="4/4">4/4</option>
+              <option value="3/4">3/4</option>
+              <option value="2/4">2/4</option>
+              <option value="6/8">6/8</option>
+            </select>
+          </div>
+          <div id="sixEightFeelWrap" class="hidden">
+            <label for="sixEightFeelSelect" class="mb-1 block text-sm text-neutral-300">6/8 律動</label>
+            <select
+              id="sixEightFeelSelect"
+              class="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none transition focus:border-cyan-400"
+            >
+              <option value="subdivided">數 6 下（重音 1、4）</option>
+              <option value="big">兩大拍（附點四分）</option>
+            </select>
+          </div>
+        </div>
+        <p id="meterHint" class="mt-2 hidden text-xs text-neutral-500">
+          6/8 時 BPM 代表八分音符速度；「兩大拍」模式每小節只響 2 下（每 3 個八分音符一下）。
+        </p>
         <div class="mt-3 grid grid-cols-2 gap-2 text-xs text-neutral-400 md:grid-cols-4">
           <div>連線裝置: <span id="connectedClients" class="text-neutral-200">-</span></div>
           <div>已對時: <span id="readyClients" class="text-neutral-200">-</span></div>
@@ -124,6 +151,6 @@
       </div>
     </section>
 
-    <script src="./app.js?v=20260611-sync-overhaul-yellow"></script>
+    <script src="./app.js?v=20260611-meter-support"></script>
   </body>
 </html>
