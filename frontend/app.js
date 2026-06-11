@@ -178,6 +178,11 @@ function unlockAudio() {
   resumePromise.then(() => {
     updateAudioUnlockUI();
     preloadAllSounds();
+    // Wake lock requests are most likely to be granted inside a user gesture
+    // (the start command arrives via WebSocket, which is not a gesture).
+    if (isPlaying) {
+      acquireWakeLock();
+    }
   });
 }
 
@@ -191,12 +196,14 @@ function unlockAudio() {
 // ---------------------------------------------------------------------------
 
 let serverOffsetSec = 0;
+let hasEverAcquiredOffset = false; // true once any real sync sample was accepted this page session
 let syncSampleCount = 0;
 let lastRttMs = Number.NaN;
 let jitterMs = 0;
 let syncStatus = null;
 
-const SYNC_INTERVAL_MS = 2000;
+const SYNC_INTERVAL_STABLE_MS = 2000; // steady-state: only fights clock drift
+const SYNC_INTERVAL_FAST_MS = 500; // before reliable sync: converge quickly
 const SYNC_WARMUP_REQUESTS = 10;
 const SYNC_SAMPLE_WINDOW = 10; // sliding window of recent sync samples
 const SYNC_ACQUIRE_SAMPLES = 5; // jump directly to target during acquisition
@@ -412,20 +419,22 @@ function sendBpm(nextBpm) {
 }
 
 function resetStageVisual() {
-  flashStage.classList.remove("bg-red-500", "bg-white");
+  flashStage.classList.remove("bg-yellow-400");
   flashStage.classList.add("bg-neutral-900");
 }
 
-function flashBeat(isFirstBeat) {
-  flashStage.classList.remove("bg-neutral-900", "bg-red-500", "bg-white");
-  flashStage.classList.add(isFirstBeat ? "bg-red-500" : "bg-white");
+// All beats flash the same yellow; downbeat is still distinguished by sound
+// (mode B) and the beat number display.
+function flashBeat() {
+  flashStage.classList.remove("bg-neutral-900");
+  flashStage.classList.add("bg-yellow-400");
 
   setTimeout(() => {
     if (!isPlaying) {
       resetStageVisual();
       return;
     }
-    flashStage.classList.remove("bg-red-500", "bg-white");
+    flashStage.classList.remove("bg-yellow-400");
     flashStage.classList.add("bg-neutral-900");
   }, 120);
 }
@@ -459,7 +468,7 @@ function onTick() {
   lastBeatIndex = beatIndex;
   const beatInBar = ((beatIndex % 4) + 4) % 4;
   beatText.textContent = String(beatInBar + 1);
-  flashBeat(beatInBar === 0);
+  flashBeat();
   updateInfoUI();
 }
 
@@ -542,9 +551,10 @@ function applyStateFromServer(payload) {
   loadMetronomeSounds(soundMode);
   updateAudioUnlockUI();
 
-  // Coarse fallback offset, only before any real sync sample exists.
-  // (Not latency-compensated, so never let it overwrite measured offsets.)
-  if (typeof payload.server_time === "number" && syncSampleCount === 0) {
+  // Coarse fallback offset, only if this page has never completed a real sync.
+  // (Not latency-compensated — must never overwrite a measured offset, e.g.
+  // right after a reconnect while playing, or the phase would jump audibly.)
+  if (typeof payload.server_time === "number" && !hasEverAcquiredOffset) {
     serverOffsetSec = payload.server_time - perfNowSec();
   }
 
@@ -566,6 +576,7 @@ function applyStateFromServer(payload) {
     clearScheduledAudio();
     startTickLoop();
     acquireWakeLock();
+    syncBurst(); // refine offset during the 2~5s countdown before the first beat
   }
 
   updateInfoUI();
@@ -606,6 +617,7 @@ function updateOffsetWithSync(payload) {
   const midpoint = (clientSentAt + clientReceivedAt) / 2;
   const candidateOffset = serverTime - midpoint;
 
+  hasEverAcquiredOffset = true;
   syncSamples.push({ rttMs, offset: candidateOffset });
   if (syncSamples.length > SYNC_SAMPLE_WINDOW) {
     syncSamples.shift();
@@ -649,15 +661,33 @@ function requestSync() {
   });
 }
 
-function startSyncLoop() {
+// Adaptive interval: sync fast (500ms) until the offset is reliable, then
+// back off to 2s — steady-state only needs to counter clock drift (~us/sec),
+// so a shorter stable interval adds traffic without audible benefit.
+function scheduleNextSync() {
   if (syncTimer) {
-    clearInterval(syncTimer);
+    clearTimeout(syncTimer);
   }
-  syncTimer = setInterval(requestSync, SYNC_INTERVAL_MS);
+  const interval = hasReliableSync() ? SYNC_INTERVAL_STABLE_MS : SYNC_INTERVAL_FAST_MS;
+  syncTimer = setTimeout(() => {
+    requestSync();
+    scheduleNextSync();
+  }, interval);
+}
 
+function startSyncLoop() {
   // Warm-up samples right after connect to quickly stabilize offset.
   for (let i = 0; i < SYNC_WARMUP_REQUESTS; i += 1) {
     setTimeout(requestSync, i * 80);
+  }
+  scheduleNextSync();
+}
+
+// Extra burst of samples, fired during the start countdown so every device
+// enters the first beat with a freshly corrected offset.
+function syncBurst(count = 6, spacingMs = 100) {
+  for (let i = 0; i < count; i += 1) {
+    setTimeout(requestSync, i * spacingMs);
   }
 }
 
@@ -668,10 +698,43 @@ function sendMessage(message) {
   socket.send(JSON.stringify(message));
 }
 
-function connectWebSocket() {
-  socket = new WebSocket(wsUrl);
+// Watchdog: a half-open connection (Wi-Fi roam, dead AP) can sit for tens of
+// seconds without firing "close", leaving this device on a stale offset and
+// deaf to start/stop. Sync responses normally arrive every <=2s, so a long
+// silence means the link is dead — force a reconnect.
+const SYNC_WATCHDOG_TIMEOUT_SEC = 8;
+let lastSyncResponseAt = 0;
 
-  socket.addEventListener("open", () => {
+setInterval(() => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  if (perfNowSec() - lastSyncResponseAt > SYNC_WATCHDOG_TIMEOUT_SEC) {
+    console.warn("Sync watchdog: no sync response, forcing reconnect.");
+    const stale = socket;
+    try {
+      stale.close();
+    } catch (error) {
+      // Transport already dead; ignore.
+    }
+    connectWebSocket(); // stale socket's late "close" is ignored by the guard below
+  }
+}, 2000);
+
+function connectWebSocket() {
+  const ws = new WebSocket(wsUrl);
+  socket = ws;
+
+  ws.addEventListener("open", () => {
+    if (ws !== socket) {
+      try {
+        ws.close();
+      } catch (error) {
+        // ignore
+      }
+      return;
+    }
+    lastSyncResponseAt = perfNowSec();
     syncSamples.length = 0;
     syncSampleCount = 0;
     lastRttMs = Number.NaN;
@@ -680,7 +743,10 @@ function connectWebSocket() {
     startSyncLoop();
   });
 
-  socket.addEventListener("message", (event) => {
+  ws.addEventListener("message", (event) => {
+    if (ws !== socket) {
+      return;
+    }
     try {
       const payload = JSON.parse(event.data);
       if (payload.type === "state") {
@@ -689,6 +755,7 @@ function connectWebSocket() {
         syncStatus = payload.sync_status || null;
         updateInfoUI();
       } else if (payload.type === "sync") {
+        lastSyncResponseAt = perfNowSec();
         updateOffsetWithSync(payload);
         updateInfoUI();
       } else if (payload.type === "error") {
@@ -699,9 +766,12 @@ function connectWebSocket() {
     }
   });
 
-  socket.addEventListener("close", () => {
+  ws.addEventListener("close", () => {
+    if (ws !== socket) {
+      return; // stale socket replaced by the watchdog; new connection already live
+    }
     if (syncTimer) {
-      clearInterval(syncTimer);
+      clearTimeout(syncTimer);
       syncTimer = null;
     }
     if (reconnectTimer) {

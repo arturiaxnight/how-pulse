@@ -61,6 +61,10 @@ manager = ConnectionManager()
 MIN_START_DELAY_SECONDS = 2.0
 MAX_START_DELAY_SECONDS = 5.0
 REPORT_FRESH_SECONDS = 15.0
+# Clients may sync as fast as every 500ms; rebroadcasting sync_status on every
+# sync_report would scale O(N^2/T). Throttle to at most once per second.
+SYNC_STATUS_BROADCAST_MIN_INTERVAL_SECONDS = 1.0
+last_sync_status_broadcast_at = 0.0
 
 global_state: dict[str, Any] = {
     "bpm": 120,
@@ -142,6 +146,7 @@ def healthcheck() -> dict[str, str]:
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
+    global last_sync_status_broadcast_at
     await manager.connect(websocket)
     client_id = uuid.uuid4().hex[:8]
     client_ids[websocket] = client_id
@@ -197,10 +202,18 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     global_state["sound_mode"] = sound_mode
                     updated = True
             elif msg_type == "start":
-                start_delay_seconds = compute_start_delay_seconds()
-                global_state["is_playing"] = True
-                global_state["start_time"] = server_now() + start_delay_seconds
-                updated = True
+                if global_state["is_playing"]:
+                    # Guard against accidental double-tap: restarting would reset
+                    # the shared beat timeline for every connected device.
+                    await manager.send_personal_message(
+                        {"type": "error", "message": "Already playing. Stop first to restart."},
+                        websocket,
+                    )
+                else:
+                    start_delay_seconds = compute_start_delay_seconds()
+                    global_state["is_playing"] = True
+                    global_state["start_time"] = server_now() + start_delay_seconds
+                    updated = True
             elif msg_type == "stop":
                 global_state["is_playing"] = False
                 global_state["start_time"] = None
@@ -227,7 +240,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "sample_count": to_int(data.get("sample_count"), 0),
                         "updated_at": server_now(),
                     }
-                    await manager.broadcast(sync_status_message())
+                    now = server_now()
+                    if (now - last_sync_status_broadcast_at) >= SYNC_STATUS_BROADCAST_MIN_INTERVAL_SECONDS:
+                        last_sync_status_broadcast_at = now
+                        await manager.broadcast(sync_status_message())
             else:
                 await manager.send_personal_message(
                     {"type": "error", "message": f"Unknown message type: {msg_type}"},
