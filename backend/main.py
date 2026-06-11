@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 import uuid
@@ -17,6 +18,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Monotonic server clock anchored to epoch at startup.
+# Immune to NTP steps / wall-clock adjustments while the process is running,
+# so start_time and sync responses always share a consistent timeline.
+_SERVER_EPOCH_BASE = time.time() - time.monotonic()
+
+
+def server_now() -> float:
+    return _SERVER_EPOCH_BASE + time.monotonic()
+
 
 class ConnectionManager:
     def __init__(self) -> None:
@@ -34,14 +44,17 @@ class ConnectionManager:
         await websocket.send_json(message)
 
     async def broadcast(self, message: dict[str, Any]) -> None:
-        disconnected: list[WebSocket] = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception:
-                disconnected.append(connection)
-        for connection in disconnected:
-            self.disconnect(connection)
+        # Concurrent send: one slow client no longer delays delivery to others.
+        connections = list(self.active_connections)
+        if not connections:
+            return
+        results = await asyncio.gather(
+            *(connection.send_json(message) for connection in connections),
+            return_exceptions=True,
+        )
+        for connection, result in zip(connections, results):
+            if isinstance(result, Exception):
+                self.disconnect(connection)
 
 
 manager = ConnectionManager()
@@ -60,7 +73,7 @@ client_reports: dict[str, dict[str, Any]] = {}
 
 
 def compute_start_delay_seconds() -> float:
-    now = time.time()
+    now = server_now()
     fresh_reports = [
         report
         for report in client_reports.values()
@@ -76,7 +89,7 @@ def compute_start_delay_seconds() -> float:
 
 
 def sync_status_payload() -> dict[str, Any]:
-    now = time.time()
+    now = server_now()
     fresh_reports = [
         report
         for report in client_reports.values()
@@ -110,7 +123,7 @@ def state_payload() -> dict[str, Any]:
         "type": "state",
         "state": global_state,
         "sync_status": sync_status_payload(),
-        "server_time": time.time(),
+        "server_time": server_now(),
     }
 
 
@@ -118,7 +131,7 @@ def sync_status_message() -> dict[str, Any]:
     return {
         "type": "sync_status",
         "sync_status": sync_status_payload(),
-        "server_time": time.time(),
+        "server_time": server_now(),
     }
 
 
@@ -186,7 +199,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             elif msg_type == "start":
                 start_delay_seconds = compute_start_delay_seconds()
                 global_state["is_playing"] = True
-                global_state["start_time"] = time.time() + start_delay_seconds
+                global_state["start_time"] = server_now() + start_delay_seconds
                 updated = True
             elif msg_type == "stop":
                 global_state["is_playing"] = False
@@ -198,7 +211,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await manager.send_personal_message(
                     {
                         "type": "sync",
-                        "server_time": time.time(),
+                        "server_time": server_now(),
                         "client_sent_at": data.get("client_sent_at"),
                     },
                     websocket,
@@ -212,7 +225,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "jitter_ms": to_float(data.get("jitter_ms"), 0.0),
                         "synced": bool(data.get("synced", False)),
                         "sample_count": to_int(data.get("sample_count"), 0),
-                        "updated_at": time.time(),
+                        "updated_at": server_now(),
                     }
                     await manager.broadcast(sync_status_message())
             else:

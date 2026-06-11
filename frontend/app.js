@@ -106,7 +106,7 @@ function ensureAudioContext() {
   if (!AudioContextClass) {
     return null;
   }
-  audioContext = new AudioContextClass();
+  audioContext = new AudioContextClass({ latencyHint: "interactive" });
   updateAudioUnlockUI();
   return audioContext;
 }
@@ -157,6 +157,12 @@ async function loadMetronomeSounds(targetMode = soundMode) {
   return modeAudioState.promise;
 }
 
+function preloadAllSounds() {
+  // Preload both modes so the first beat never gets swallowed by decode time.
+  loadMetronomeSounds("A");
+  loadMetronomeSounds("B");
+}
+
 function unlockAudio() {
   const ctx = ensureAudioContext();
   if (!ctx) {
@@ -171,47 +177,154 @@ function unlockAudio() {
       : Promise.resolve();
   resumePromise.then(() => {
     updateAudioUnlockUI();
-    loadMetronomeSounds(soundMode);
+    preloadAllSounds();
   });
 }
 
-function playBeatSound(isFirstBeat) {
-  const ctx = ensureAudioContext();
-  if (!ctx || ctx.state !== "running") {
-    updateAudioUnlockUI();
-    return;
-  }
-  const modeAudioState = getModeAudioState(soundMode);
-  const buffer = isFirstBeat ? modeAudioState.buffers.downbeat : modeAudioState.buffers.upbeat;
-  if (!buffer) {
-    loadMetronomeSounds(soundMode);
-    return;
-  }
-  const source = ctx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(ctx.destination);
-  source.start();
-}
+// ---------------------------------------------------------------------------
+// Timebase
+//
+// Local time uses performance.now() (monotonic) instead of Date.now().
+// Date.now() is wall-clock time: the OS can step it at any moment (NTP
+// adjustment), which instantly shifts the beat phase on that device only.
+// serverOffsetSec maps monotonic local seconds -> server epoch seconds.
+// ---------------------------------------------------------------------------
 
-// serverOffsetSec = serverEpoch - localEpoch
 let serverOffsetSec = 0;
-let bestSyncRttMs = Number.POSITIVE_INFINITY;
 let syncSampleCount = 0;
-let lastRttMs = Number.POSITIVE_INFINITY;
+let lastRttMs = Number.NaN;
 let jitterMs = 0;
 let syncStatus = null;
+
 const SYNC_INTERVAL_MS = 2000;
 const SYNC_WARMUP_REQUESTS = 10;
+const SYNC_SAMPLE_WINDOW = 10; // sliding window of recent sync samples
+const SYNC_ACQUIRE_SAMPLES = 5; // jump directly to target during acquisition
+const CLOCK_STEP_THRESHOLD_SEC = 0.3; // beyond this, treat as clock step and jump
+const SLEW_MAX_STEP_SEC = 0.03; // max correction per accepted sample while playing
+const RELIABLE_RTT_MS = 200; // window-min RTT must be below this to count as synced
 const MIN_BPM = 40;
 const MAX_BPM = 180;
 
-function hasReliableSync() {
-  return Number.isFinite(bestSyncRttMs) && bestSyncRttMs < 700 && syncSampleCount >= 3;
+const syncSamples = []; // { rttMs, offset } — recent window
+
+function perfNowSec() {
+  return performance.now() / 1000;
 }
 
 function nowServerEpochSec() {
-  return Date.now() / 1000 + serverOffsetSec;
+  return perfNowSec() + serverOffsetSec;
 }
+
+function windowMinRttMs() {
+  if (syncSamples.length === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  let min = syncSamples[0].rttMs;
+  for (const sample of syncSamples) {
+    if (sample.rttMs < min) {
+      min = sample.rttMs;
+    }
+  }
+  return min;
+}
+
+function hasReliableSync() {
+  return syncSamples.length >= 3 && syncSampleCount >= SYNC_ACQUIRE_SAMPLES
+    ? windowMinRttMs() < RELIABLE_RTT_MS
+    : false;
+}
+
+// ---------------------------------------------------------------------------
+// Audio scheduler
+//
+// Beats are scheduled ahead of time on the AudioContext hardware clock via
+// source.start(when) instead of being fired "now" from a 10ms polling tick.
+// This removes tick granularity / event-loop lag from the audible beat and
+// makes devices converge to the shared server timeline.
+// Output latency (device DAC/buffer delay) is compensated so sound leaves
+// the speaker on the beat, not "enters the audio pipeline" on the beat.
+// ---------------------------------------------------------------------------
+
+const LOOKAHEAD_SEC = 0.3; // schedule beats this far ahead; tolerates tick throttling
+const LATE_TOLERANCE_SEC = 0.05; // beats later than this are skipped, not played off-grid
+
+let schedulerNextBeat = null; // next beat index to schedule (null = recompute)
+let scheduledSources = [];
+
+function outputLatencySec(ctx) {
+  const latency = Number(ctx.outputLatency) || Number(ctx.baseLatency) || 0;
+  return Number.isFinite(latency) && latency >= 0 && latency < 0.5 ? latency : 0;
+}
+
+function clearScheduledAudio() {
+  for (const item of scheduledSources) {
+    try {
+      item.source.onended = null;
+      item.source.stop();
+    } catch (error) {
+      // Source may have already ended; ignore.
+    }
+  }
+  scheduledSources = [];
+  schedulerNextBeat = null;
+}
+
+function scheduleBeatsAhead() {
+  if (!isPlaying || startTime === null) {
+    return;
+  }
+  const ctx = audioContext;
+  if (!ctx || ctx.state !== "running") {
+    return;
+  }
+  const buffers = getModeAudioState(soundMode).buffers;
+  if (!buffers.downbeat || !buffers.upbeat) {
+    loadMetronomeSounds(soundMode);
+    return;
+  }
+
+  const beatDuration = 60 / bpm;
+  const serverNow = nowServerEpochSec();
+
+  if (schedulerNextBeat === null) {
+    const elapsed = serverNow - startTime;
+    schedulerNextBeat = elapsed <= 0 ? 0 : Math.floor(elapsed / beatDuration) + 1;
+  }
+
+  const horizon = serverNow + LOOKAHEAD_SEC;
+  while (startTime + schedulerNextBeat * beatDuration <= horizon) {
+    const beatIndex = schedulerNextBeat;
+    schedulerNextBeat += 1;
+
+    const beatServerTime = startTime + beatIndex * beatDuration;
+    const when =
+      ctx.currentTime + (beatServerTime - nowServerEpochSec()) - outputLatencySec(ctx);
+
+    if (when < ctx.currentTime - LATE_TOLERANCE_SEC) {
+      continue; // too late (e.g. resumed from background) — skip instead of playing off-grid
+    }
+
+    const isFirstBeat = ((beatIndex % 4) + 4) % 4 === 0;
+    const source = ctx.createBufferSource();
+    source.buffer = isFirstBeat ? buffers.downbeat : buffers.upbeat;
+    source.connect(ctx.destination);
+    source.start(Math.max(when, ctx.currentTime));
+
+    const entry = { source, beatIndex };
+    scheduledSources.push(entry);
+    source.onended = () => {
+      const idx = scheduledSources.indexOf(entry);
+      if (idx !== -1) {
+        scheduledSources.splice(idx, 1);
+      }
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UI
+// ---------------------------------------------------------------------------
 
 function updateBpmLockUI() {
   const locked = isPlaying;
@@ -255,7 +368,7 @@ function updateSyncStatusUI() {
   }
 
   if (hasReliableSync()) {
-    localSyncQuality.textContent = `${bestSyncRttMs.toFixed(0)}ms / ${jitterMs.toFixed(0)}ms`;
+    localSyncQuality.textContent = `${windowMinRttMs().toFixed(0)}ms / ${jitterMs.toFixed(0)}ms`;
   } else {
     localSyncQuality.textContent = "syncing...";
   }
@@ -282,6 +395,17 @@ function updateInfoUI() {
   updateSyncStatusUI();
 }
 
+let lastShownCountdown = null;
+
+function maybeUpdateCountdownUI() {
+  const countdownSec = startTime === null ? 0 : startTime - nowServerEpochSec();
+  const shown = Math.max(0, countdownSec).toFixed(1);
+  if (shown !== lastShownCountdown) {
+    lastShownCountdown = shown;
+    updateInfoUI();
+  }
+}
+
 function sendBpm(nextBpm) {
   const clamped = Math.max(MIN_BPM, Math.min(MAX_BPM, Number(nextBpm)));
   sendMessage({ type: "set_bpm", bpm: clamped });
@@ -295,7 +419,6 @@ function resetStageVisual() {
 function flashBeat(isFirstBeat) {
   flashStage.classList.remove("bg-neutral-900", "bg-red-500", "bg-white");
   flashStage.classList.add(isFirstBeat ? "bg-red-500" : "bg-white");
-  playBeatSound(isFirstBeat);
 
   setTimeout(() => {
     if (!isPlaying) {
@@ -307,15 +430,23 @@ function flashBeat(isFirstBeat) {
   }, 120);
 }
 
+// ---------------------------------------------------------------------------
+// Tick loop: drives the visual flash and tops up the audio schedule.
+// Audio timing no longer depends on tick punctuality — a throttled tick only
+// delays the *visual*, while already-scheduled audio keeps playing on time.
+// ---------------------------------------------------------------------------
+
 function onTick() {
   if (!isPlaying || startTime === null) {
     return;
   }
 
+  scheduleBeatsAhead();
+
   const elapsed = nowServerEpochSec() - startTime;
   if (elapsed < 0) {
     beatText.textContent = "-";
-    updateInfoUI();
+    maybeUpdateCountdownUI();
     return;
   }
 
@@ -329,6 +460,7 @@ function onTick() {
   const beatInBar = ((beatIndex % 4) + 4) % 4;
   beatText.textContent = String(beatInBar + 1);
   flashBeat(beatInBar === 0);
+  updateInfoUI();
 }
 
 function startTickLoop() {
@@ -352,6 +484,49 @@ function stopTickLoop() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Screen wake lock: prevents mobile screens from dimming/locking mid-set,
+// which would throttle timers and suspend the AudioContext.
+// ---------------------------------------------------------------------------
+
+let wakeLock = null;
+
+async function acquireWakeLock() {
+  if (!("wakeLock" in navigator)) {
+    return;
+  }
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+  } catch (error) {
+    // Permission denied or not allowed without user activation; non-fatal.
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLock) {
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") {
+    return;
+  }
+  if (isPlaying) {
+    acquireWakeLock();
+  }
+  // iOS suspends the AudioContext on screen lock / background. Surface the
+  // unlock panel again so the member knows to tap once to restore sound.
+  if (audioContext && audioContext.state === "suspended") {
+    updateAudioUnlockUI();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Server state
+// ---------------------------------------------------------------------------
+
 function applyStateFromServer(payload) {
   const state = payload.state || {};
   const prevIsPlaying = isPlaying;
@@ -367,10 +542,10 @@ function applyStateFromServer(payload) {
   loadMetronomeSounds(soundMode);
   updateAudioUnlockUI();
 
-  // Fallback offset before sync responses arrive.
-  if (typeof payload.server_time === "number" && !hasReliableSync()) {
-    const receivedAtLocalEpoch = Date.now() / 1000;
-    serverOffsetSec = payload.server_time - receivedAtLocalEpoch;
+  // Coarse fallback offset, only before any real sync sample exists.
+  // (Not latency-compensated, so never let it overwrite measured offsets.)
+  if (typeof payload.server_time === "number" && syncSampleCount === 0) {
+    serverOffsetSec = payload.server_time - perfNowSec();
   }
 
   const startTimeChanged =
@@ -383,28 +558,44 @@ function applyStateFromServer(payload) {
     lastBeatIndex = -1;
     beatText.textContent = "-";
     stopTickLoop();
+    clearScheduledAudio();
+    releaseWakeLock();
     resetStageVisual();
   } else if (shouldResetBeats) {
     lastBeatIndex = -1;
+    clearScheduledAudio();
     startTickLoop();
+    acquireWakeLock();
   }
 
   updateInfoUI();
 }
 
+// ---------------------------------------------------------------------------
+// Clock sync
+//
+// Offset selection: keep a sliding window of recent samples and follow the
+// offset of the lowest-RTT sample in the window. The old logic compared
+// against the all-time best RTT, so after one lucky sample nearly every
+// later sample was rejected and the offset froze (drift never corrected).
+// A windowed minimum adapts as network conditions change, while still
+// preferring low-latency (most accurate) samples.
+// ---------------------------------------------------------------------------
+
 function updateOffsetWithSync(payload) {
   const serverTime = Number(payload.server_time);
   const clientSentAt = Number(payload.client_sent_at);
-  const clientReceivedAt = Date.now() / 1000;
+  const clientReceivedAt = perfNowSec();
 
   if (!Number.isFinite(serverTime) || !Number.isFinite(clientSentAt)) {
     return;
   }
 
   const rttMs = (clientReceivedAt - clientSentAt) * 1000;
-  if (!Number.isFinite(rttMs) || rttMs < 0 || rttMs > 1000) {
+  if (!Number.isFinite(rttMs) || rttMs < 0 || rttMs > 2000) {
     return;
   }
+
   syncSampleCount += 1;
   if (Number.isFinite(lastRttMs)) {
     const delta = Math.abs(rttMs - lastRttMs);
@@ -412,25 +603,33 @@ function updateOffsetWithSync(payload) {
   }
   lastRttMs = rttMs;
 
-  const midpointEpoch = (clientSentAt + clientReceivedAt) / 2;
-  const candidateOffset = serverTime - midpointEpoch;
-  const previousOffset = serverOffsetSec;
-  const offsetDelta = candidateOffset - previousOffset;
+  const midpoint = (clientSentAt + clientReceivedAt) / 2;
+  const candidateOffset = serverTime - midpoint;
 
-  if (rttMs <= bestSyncRttMs) {
-    bestSyncRttMs = rttMs;
+  syncSamples.push({ rttMs, offset: candidateOffset });
+  if (syncSamples.length > SYNC_SAMPLE_WINDOW) {
+    syncSamples.shift();
   }
 
-  if (!hasReliableSync()) {
-    serverOffsetSec = candidateOffset;
-  } else if (rttMs <= bestSyncRttMs + 8) {
-    // Slew the clock to avoid visible phase jumps.
-    const maxStep = 0.012;
-    if (Math.abs(offsetDelta) > maxStep) {
-      serverOffsetSec = previousOffset + Math.sign(offsetDelta) * maxStep;
-    } else {
-      serverOffsetSec = previousOffset * 0.85 + candidateOffset * 0.15;
+  let best = syncSamples[0];
+  for (const sample of syncSamples) {
+    if (sample.rttMs < best.rttMs) {
+      best = sample;
     }
+  }
+  const targetOffset = best.offset;
+  const offsetDelta = targetOffset - serverOffsetSec;
+
+  if (syncSampleCount <= SYNC_ACQUIRE_SAMPLES || Math.abs(offsetDelta) > CLOCK_STEP_THRESHOLD_SEC) {
+    // Acquisition phase, or a genuine clock step: jump and re-align audio.
+    serverOffsetSec = targetOffset;
+    if (isPlaying) {
+      clearScheduledAudio(); // scheduled beats were on the old timeline
+    }
+  } else if (Math.abs(offsetDelta) > SLEW_MAX_STEP_SEC) {
+    serverOffsetSec += Math.sign(offsetDelta) * SLEW_MAX_STEP_SEC;
+  } else {
+    serverOffsetSec += offsetDelta * 0.3; // gentle convergence, no audible phase jump
   }
 
   sendMessage({
@@ -446,7 +645,7 @@ function updateOffsetWithSync(payload) {
 function requestSync() {
   sendMessage({
     type: "sync",
-    client_sent_at: Date.now() / 1000,
+    client_sent_at: perfNowSec(),
   });
 }
 
@@ -473,9 +672,9 @@ function connectWebSocket() {
   socket = new WebSocket(wsUrl);
 
   socket.addEventListener("open", () => {
-    bestSyncRttMs = Number.POSITIVE_INFINITY;
+    syncSamples.length = 0;
     syncSampleCount = 0;
-    lastRttMs = Number.POSITIVE_INFINITY;
+    lastRttMs = Number.NaN;
     jitterMs = 0;
     sendMessage({ type: "request_state" });
     startSyncLoop();
